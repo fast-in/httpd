@@ -1,0 +1,178 @@
+#!/bin/bash
+
+exec 3<>/proc/self/fd/2 2>&-
+function recv { msg $'<\e[91m~\e[m '"$*";}
+function send { msg $'\e[92m~\e[m> '"$*"; cat <<< "$@"$'\r';}
+
+function fail:301 {
+    local loc=$1 CLENGTH CONTENT CTYPE="text/html"
+
+    add-header "Location" "$loc"
+    CONTENT=$'<head>\n    <title>Moved Permanently</title>\n    <meta http-equiv="refresh" content="6; url=/" />\n</head>\n<body>\n    <center>\n        <h1>301 Moved Permanently</h1>\n        <hr>$PLATFORM\n    </center>\n</body>\n'
+    CLENGTH=`echo -n "$CONTENT"|wc -c`
+
+    add-header "Content-Type" "${CTYPE-text/plain}"
+    [ "$CLENGTH" ] && add-header "Content-Length" "$CLENGTH"
+
+    send-header 301
+    if [ "$GZIP_ENC" = ON ]; then
+        echo -n "$CONTENT"|gzip -9
+    else
+        echo -n "$CONTENT"
+    fi
+    exit
+}
+function fail:400 {
+    local CONTENT CTYPE="text/plain"
+
+    CONTENT=$'Bad Request\n'
+    add-header "Content-Type" "${CTYPE-text/plain}"
+
+    send-header 400
+    if [ "$GZIP_ENC" = ON ]; then
+        echo -n "$CONTENT"|gzip -9
+    else
+        echo -n "$CONTENT"
+    fi
+    exit
+}
+function fail:403 {
+    local CONTENT CTYPE="text/html"
+
+    CONTENT=$'<head>\n    <title>Forbidden</title>\n</head>\n<body>\n    <center><h1>Forbidden.</h1></center>\n</body>\n'
+    add-header "Content-Type" "${CTYPE-text/plain}"
+
+    send-header 403
+    if [ "$GZIP_ENC" = ON ]; then
+        echo -n "$CONTENT"|gzip -9
+    else
+        echo -n "$CONTENT"
+    fi
+    exit
+}
+function fail:404 {
+    local CONTENT CTYPE="text/html"
+
+    CONTENT=$'<head>\n\t<title>Page Not Found</title>\n\t<meta http-equiv="refresh" content="6; url=/" />\n</head>\n<body>\n\t<center>\n\t\t<h1>404 Page Not Found!</h1>\n\t\t<hr><p>The page you are looking for could not be found..\n\t</center>\n</body>\n'
+    add-header "Content-Type" "${CTYPE-text/plain}"
+
+    send-header 404
+    if [ "$GZIP_ENC" = ON ]; then
+        echo -n "$CONTENT"|gzip -9
+    else
+        echo -n "$CONTENT"
+    fi
+    exit
+}
+function fail:405 { send-header 405; exit;}
+function fail:500 {
+    local CONTENT CTYPE="text/plain"
+
+    CONTENT=$'error\n'
+    add-header "Content-Type" "${CTYPE-text/plain}"
+
+    send-header 500
+    if [ "$GZIP_ENC" = ON ]; then
+        echo -n "$CONTENT"|gzip -9
+    else
+        echo -n "$CONTENT"
+    fi
+    exit
+}
+
+function msg { echo "$*" >&3;}
+
+function add-header {
+    [ $# = 2 ] && HEADER_RESPONSE+=("$1: $2")
+}
+function send-header {
+    local code=$1 x
+    send "HTTP/1.1 $code ${RESPONSE_CODE[$code]}"
+    for x in "${HEADER_RESPONSE[@]}"; do
+        send "$x"
+    done
+    [ "$GZIP_ENC" = ON ] && send "Content-Encoding: gzip"
+    send
+}
+
+function read-send:file {
+    CTYPE=$(file --mime-type "$TEMP/file-s" -b)
+    CLENGTH=$(stat -c %s "$TEMP/file-s")
+
+    [ -z "$CLENGTH" -o "$CLENGTH" = 0 ] && fail:403
+    case "$CTYPE" in
+        text/*) ;;
+        *) GZIP_ENC=OFF;
+    esac
+
+    [ "$CTYPE" ] && add-header "Content-Type" "$CTYPE"
+    [ "$GZIP_ENC" = ON ] || add-header "Content-Length" "$CLENGTH"
+    add-header "Accept-Ranges" "bytes"
+
+    send-header 200
+    #cat < "$URIPATH"
+    if [ "$GZIP_ENC" = ON ]; then
+        cat "$TEMP/file-s"|gzip -9
+    else
+        cat "$TEMP/file-s"
+    fi
+    exit
+}
+
+# Auto setup environment
+export TZ="Japan/Tokyo" GZIP_ENC=OFF CTYPE="text/plain" CLENGTH= CONTENT=" "
+declare -a RESPONSE_CODE=(
+    [200]="OK"
+    [301]="Moved Permanently"
+    [400]="Bad Request"
+    [403]="Forbidden"
+    [404]="Not Found"
+    [405]="Method Not Allowed"
+    [500]="Error"
+)
+declare -a HEADER_RESPONSE=(
+    "Date: $(date +'%a, %d %b %Y %H:%M:%S GMT')"
+    "Server: httpd/bash-script"
+    "Connection: close"
+)
+
+trap 'fail:500' ERR
+trap 'rm -r -f "$TEMP"' 0 2 15
+
+# received request.
+read -r line
+line=${line%$'\r'*}
+read -r METHOD URI RVERSION <<< "$line"
+URIPATH="$(cd .; echo "$PWD")/$URI"
+
+TEMP="${TMPDIR-/tmp}/$$-httpd"
+(umask 077 && mkdir "$TEMP") || {
+    msg "Could not create temporary directory."
+    fail:500 || false
+    exit 1
+}
+
+recv "Request: $URI"
+while read -r line; do
+    line=${line%$'\r'*}
+    recv "$line"
+    if [ "$(echo $line|grep -iw accept-encoding|grep -wo gzip)" = gzip ]; then
+        GZIP_ENC=ON
+    fi
+
+    [ "$line" ] || break
+done
+
+if curl "file://$URIPATH/index.htm" -o "$TEMP/file-s"; then
+    read-send:file
+elif curl "file://$URIPATH/index.html" -o "$TEMP/file-s"; then
+    read-send:file
+elif curl "file://$URIPATH" -o "$TEMP/file-s"; then
+    read-send:file
+else
+    fail:404
+fi
+
+fail:500
+
+VERSION="0.0.1-1"
